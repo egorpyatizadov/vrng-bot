@@ -1,13 +1,18 @@
-
+# Какой модуль запускать по умолчанию: discord | telegram.
+# Приоритет: active_module.txt (пишется админкой) > env ACTIVE_MODULE > это поле.
+active_module: discord
 
 owner:
-  id: 787331771255357450
+  id: 787331771255357450          # Discord user id
+  telegram_id: 2102079242         # Telegram user id — впиши свой (нужно для telegram-режима)
 
 friends:
   ids:
     - 987654321098765432
     - 876543210987654321
+  telegram_ids: []                # Telegram user id друзей
 
 vip:
   ids:
     - 1132025740062376118
+  telegram_ids: []                # Telegram user id VIP
