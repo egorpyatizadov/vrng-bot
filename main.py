@@ -1,6 +1,7 @@
 """
 Админка Кати. Одна страница / со статусом (ассеты StayPresent) + управление.
-Супервизор l6.py пишет в status_registry.
+Супервизор l6.py / l6_tg.py пишет в status_registry.
+Активный модуль: active_module.txt > env ACTIVE_MODULE > conf.yaml > discord.
 UI (title/theme/accent/секции/тексты/футер) читается из conf.yaml на каждый запрос.
 Роли — из env-переменных ADMIN_TOKEN_OWNER/ADMIN_TOKEN_ADMIN/ADMIN_TOKEN_JUNIOR.
 """
@@ -43,10 +44,43 @@ except ImportError:
 PORT = int(os.getenv("PORT", 8080))
 PROMPT_FILE = Path("system_prompt.txt")
 CONF_FILE = Path("conf.yaml")
-BOT_FILE = "l6.py"
+RUNTIME_MODULE_FILE = Path("active_module.txt")   # пишется админкой
+
+MODULE_FILES = {
+    "discord":  ("l6.py",    "kate-bot (discord)",  "Discord-бот Катя"),
+    "telegram": ("l6_tg.py", "kate-bot (telegram)", "Telegram-бот Катя"),
+}
+
+
+def _resolve_active_module() -> str:
+    """Приоритет: runtime-файл > env ACTIVE_MODULE > conf.yaml > 'discord'."""
+    try:
+        name = RUNTIME_MODULE_FILE.read_text(encoding="utf-8").strip().lower()
+        if name in MODULE_FILES:
+            return name
+    except FileNotFoundError:
+        pass
+
+    env = (os.getenv("ACTIVE_MODULE") or "").strip().lower()
+    if env in MODULE_FILES:
+        return env
+
+    try:
+        with CONF_FILE.open("r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        name = str(cfg.get("active_module") or "").strip().lower()
+        if name in MODULE_FILES:
+            return name
+    except (FileNotFoundError, yaml.YAMLError):
+        pass
+
+    return "discord"
+
+
+ACTIVE_MODULE = _resolve_active_module()
+BOT_FILE, BOT_NAME, BOT_DESCRIPTION = MODULE_FILES[ACTIVE_MODULE]
+
 BOT_INDEX = 0
-BOT_NAME = "kate-bot"
-BOT_DESCRIPTION = "Discord-бот Катя"
 SUPERVISOR_DELAY = 3.0
 MAX_RESTARTS = 5
 RESTART_RESET_AFTER = 60.0
@@ -87,7 +121,7 @@ def _load_admins() -> dict:
         if not token:
             continue
         if token in result:
-            continue  # тот же токен уже привязан — не перезаписываем
+            continue
         result[token] = role
     return result
 
@@ -117,6 +151,7 @@ UI_DEFAULTS = {
     "sections": {
         "status": True,
         "controls": True,
+        "module": True,
         "prompt": True,
         "footer": True,
     },
@@ -124,6 +159,10 @@ UI_DEFAULTS = {
         "controls_heading": "⚙️ Управление",
         "restart_bot": "🔄 Перезапустить бота",
         "hard_restart": "☠️ Жёсткий рестарт",
+        "module_heading": "🎛️ Активный модуль",
+        "module_discord": "💬 Discord",
+        "module_telegram": "📨 Telegram",
+        "module_hint": "Переключение перезапустит процесс — Render поднимет заново с новым модулем.",
         "prompt_heading": "📝 Системный промпт",
         "save_prompt": "💾 Сохранить промпт",
         "prompt_hint": "Файл: system_prompt.txt. Изменения применяются со следующего сообщения.",
@@ -228,7 +267,7 @@ def _self_ping():
 
 
 # ============================================================
-# СУПЕРВИЗОР l6.py
+# СУПЕРВИЗОР
 # ============================================================
 def _supervise():
     global current_proc
@@ -264,7 +303,7 @@ def _supervise():
             try:
                 for line in iter(proc.stdout.readline, ""):
                     line = line.rstrip("\n")
-                    print(f"[l6] {line}", flush=True)
+                    print(f"[{BOT_FILE}] {line}", flush=True)
                     append_log(BOT_INDEX, "stdout", line)
             except Exception as e:
                 print(f"[supervisor] ошибка чтения stdout: {e}", flush=True)
@@ -280,7 +319,7 @@ def _supervise():
             uptime = time.monotonic() - (started_at or time.monotonic())
 
             if code == 0:
-                print("[supervisor] l6 завершился штатно", flush=True)
+                print(f"[supervisor] {BOT_FILE} завершился штатно", flush=True)
                 mark_clean_exit(BOT_INDEX)
                 return
 
@@ -294,7 +333,8 @@ def _supervise():
                 return
 
             restarts += 1
-            print(f"[supervisor] l6 упал (код {code}), рестарт {restarts}/{MAX_RESTARTS}", flush=True)
+            print(f"[supervisor] {BOT_FILE} упал (код {code}), "
+                  f"рестарт {restarts}/{MAX_RESTARTS}", flush=True)
             mark_crashed(BOT_INDEX, code, will_restart=True)
 
             if _stop.wait(timeout=SUPERVISOR_DELAY):
@@ -323,16 +363,40 @@ def _read_prompt() -> str:
         return ""
 
 
+def _module_button(module_key: str, label: str) -> str:
+    active = module_key == ACTIVE_MODULE
+    if active:
+        style = ("background:var(--primary-color);color:white;border:none;"
+                 "cursor:default;opacity:0.9;")
+        onclick_attr = " disabled"
+        suffix = " ✓"
+    else:
+        style = ("background:var(--white);color:var(--dark);"
+                 "border:1px solid var(--border-color);cursor:pointer;")
+        onclick_attr = (
+            " onclick=\"if(confirm('Переключить на " + module_key +
+            "? Процесс перезапустится.'))moduleSwitch('" + module_key + "')\""
+        )
+        suffix = ""
+    return (
+        '<button type="button"' + onclick_attr +
+        ' style="padding:10px 20px;border-radius:8px;font-weight:600;' + style + '">' +
+        html_escape.escape(label) + suffix + '</button>'
+    )
+
+
 def _build_admin_html() -> str:
     ui = _load_ui()
     l = ui["labels"]
-    sections = dict(ui["sections"])  # копия, не мутируем дефолты
+    sections = dict(ui["sections"])
 
     # Скрываем секции по правам текущей роли
     if not _has_perm("prompt"):
         sections["prompt"] = False
     if not _has_perm("restart_bot") and not _has_perm("restart_all"):
         sections["controls"] = False
+    if not _has_perm("restart_all"):
+        sections["module"] = False
 
     prompt_value = _read_prompt()
     prompt_escaped = (
@@ -341,13 +405,15 @@ def _build_admin_html() -> str:
         else "— пусто, бот использует встроенный дефолт —"
     )
 
-    # Бейдж роли + выход
     role = _get_role() or "?"
     role_badge = f"""
       <div style="background:var(--light-secondary);padding:10px 16px;border-radius:8px;
                   margin-bottom:20px;font-size:0.9em;color:var(--gray);display:flex;
-                  justify-content:space-between;align-items:center;gap:12px;">
-        <span>Роль: <b style="color:var(--primary-color)">{html_escape.escape(role)}</b></span>
+                  justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+        <span>Роль: <b style="color:var(--primary-color)">{html_escape.escape(role)}</b>
+              &nbsp;·&nbsp; Модуль: <b style="color:var(--primary-color)">{html_escape.escape(ACTIVE_MODULE)}</b>
+              &nbsp;·&nbsp; Файл: <code>{html_escape.escape(BOT_FILE)}</code>
+        </span>
         <button type="button"
                 onclick="fetch('/logout',{{method:'POST'}}).then(()=>location.reload())"
                 style="padding:6px 14px;border-radius:6px;border:none;background:var(--danger-color);color:white;cursor:pointer;font-weight:600;font-size:0.85em;">
@@ -370,6 +436,20 @@ def _build_admin_html() -> str:
             {html_escape.escape(l['hard_restart'])}
           </button>
         </div>
+        """)
+
+    if sections.get("module"):
+        parts.append(f"""
+        <h2 style="font-size:1.2em;margin:30px 0 12px;font-weight:700;">
+          {html_escape.escape(l['module_heading'])}
+        </h2>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          {_module_button('discord', l['module_discord'])}
+          {_module_button('telegram', l['module_telegram'])}
+        </div>
+        <p style="color:var(--gray);font-size:0.85em;margin-top:8px;">
+          {html_escape.escape(l['module_hint'])}
+        </p>
         """)
 
     if sections.get("prompt"):
@@ -397,12 +477,32 @@ def _build_admin_html() -> str:
             'style="margin-top:50px;padding-top:30px;border-top:2px solid var(--border-color);">'
             + role_badge
             + "".join(parts)
-            + '<script>async function adminPost(url){const r=await fetch(url,{method:"POST"});'
-              'const j=await r.json();alert(JSON.stringify(j));}</script>'
+            + """<script>
+async function adminPost(url){
+  const r = await fetch(url, {method:"POST"});
+  const j = await r.json().catch(()=>({}));
+  alert(JSON.stringify(j));
+}
+async function moduleSwitch(name){
+  const r = await fetch('/switch-module', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({module: name})
+  });
+  const j = await r.json().catch(()=>({}));
+  if (!r.ok) { alert(JSON.stringify(j)); return; }
+  document.body.innerHTML = '<div style="padding:60px;text-align:center;font-family:sans-serif;color:var(--dark)">⏳ Переключение на ' + name + '… страница обновится автоматически</div>';
+  const wait = setInterval(async () => {
+    try {
+      const h = await fetch('/health', {cache: 'no-store'});
+      if (h.ok) { clearInterval(wait); location.reload(); }
+    } catch (e) {}
+  }, 2000);
+}
+</script>"""
             + "</section>"
         )
 
-    # --- Сборка из шаблона StayPresent ---
     html = STATUS_HTML_TEMPLATE
 
     accent = ui["accent_color"]
@@ -482,7 +582,7 @@ def _login_page(err: str = "") -> str:
 
     if theme == "light":
         bg, card, line, text, muted, input_bg = "#f8fafc", "#ffffff", "#e2e8f0", "#0f172a", "#64748b", "#f1f5f9"
-    else:  # dark или auto
+    else:
         bg, card, line, text, muted, input_bg = "#0b1220", "#16202f", "#2d3b4e", "#e6edf3", "#94a3b8", "#0b1220"
 
     e = f'<p style="color:#f87171;margin:0 0 1rem">{html_escape.escape(err)}</p>' if err else ""
@@ -595,7 +695,7 @@ def restart_bot_route():
     if not _has_perm("restart_bot"):
         return jsonify({"error": "forbidden"}), 403
     _restart_bot()
-    return jsonify({"status": "restarting l6"})
+    return jsonify({"status": "restarting " + BOT_FILE})
 
 
 @app.route("/restart-all", methods=["POST"])
@@ -604,6 +704,33 @@ def restart_all_route():
         return jsonify({"error": "forbidden"}), 403
     threading.Timer(1.0, lambda: os._exit(0)).start()
     return jsonify({"status": "dying"})
+
+
+@app.route("/switch-module", methods=["POST"])
+def switch_module_route():
+    if not _has_perm("restart_all"):
+        return jsonify({"error": "forbidden"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    module = str((data or {}).get("module") or "").strip().lower()
+
+    if module not in MODULE_FILES:
+        return jsonify({
+            "error": f"unknown module: {module!r}",
+            "allowed": list(MODULE_FILES.keys()),
+        }), 400
+
+    if module == ACTIVE_MODULE:
+        return jsonify({"status": "already_active", "module": module})
+
+    try:
+        RUNTIME_MODULE_FILE.write_text(module + "\n", encoding="utf-8")
+    except OSError as e:
+        return jsonify({"error": f"can't write {RUNTIME_MODULE_FILE}: {e}"}), 500
+
+    print(f"[main] switch-module: {ACTIVE_MODULE} → {module}, рестарт", flush=True)
+    threading.Timer(1.0, lambda: os._exit(0)).start()
+    return jsonify({"status": "switching", "from": ACTIVE_MODULE, "to": module})
 
 
 # ============================================================
@@ -625,6 +752,8 @@ def _shutdown(signum, frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
+
+    print(f"[main] активный модуль: {ACTIVE_MODULE} → {BOT_FILE}", flush=True)
 
     registry_reset(
         [{"file": BOT_FILE, "module": None, "args": [], "env": {}, "status": None}],
