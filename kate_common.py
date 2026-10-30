@@ -1,5 +1,6 @@
 """
 Общая логика для Discord- и Telegram-ботов «Катя».
+Провайдер LLM: LLM7 (OpenAI-совместимый API).
 Импортирует и инициализирует каждый бот: kate_common.init("discord" | "telegram").
 """
 
@@ -10,7 +11,7 @@ import sys
 import httpx
 import yaml
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+LLM7_URL = "https://api.llm7.io/v1/chat/completions"
 REQUEST_TIMEOUT = 60.0
 DISCORD_LIMIT = 1900
 TELEGRAM_LIMIT = 4000  # лимит TG — 4096, оставляем запас
@@ -34,15 +35,15 @@ _config: dict = {}
 OWNER_ID: int = 0
 FRIEND_IDS: list[int] = []
 VIP_IDS: list[int] = []
-MODEL: str = ""
+MODEL: str = "default"
 TEMPERATURE: float = 0.7
-OPENROUTER_API_KEY: str | None = None
+LLM7_API_KEY: str | None = None
 
 
 def init(platform: str) -> None:
     """Загружает конфиг и валидирует env. Вызывается один раз при старте бота."""
     global _platform, _config, OWNER_ID, FRIEND_IDS, VIP_IDS
-    global MODEL, TEMPERATURE, OPENROUTER_API_KEY
+    global MODEL, TEMPERATURE, LLM7_API_KEY
 
     if platform not in ("discord", "telegram"):
         raise ValueError(f"unknown platform: {platform!r}")
@@ -69,14 +70,12 @@ def init(platform: str) -> None:
         FRIEND_IDS = [int(x) for x in (_config.get("friends") or {}).get("ids") or []]
         VIP_IDS = [int(x) for x in (_config.get("vip") or {}).get("ids") or []]
 
-    OPENROUTER_API_KEY = (os.getenv("OPENROUTER_API_KEY") or "").strip() or None
-    if not OPENROUTER_API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY не задан")
+    # LLM7 API-ключ опционален: без него используется бесплатный тариф
+    # с api_key="unused".
+    LLM7_API_KEY = (os.getenv("LLM7_API_KEY") or os.getenv("OPENROUTER_API_KEY") or "").strip() or None
 
     model_env = (os.getenv("Model") or "").strip()
-    if not model_env:
-        raise RuntimeError("Model не задан (например: openai/gpt-4o-mini)")
-    MODEL = model_env
+    MODEL = model_env or "default"
 
     temp_env = (os.getenv("Temp") or "").strip()
     try:
@@ -134,39 +133,37 @@ def build_messages(user_id: int, display_name: str, prompt: str) -> list[dict]:
 
 
 # ============================================================
-# OPENROUTER
+# LLM7 (OpenAI-совместимый провайдер)
 # ============================================================
-async def ask_openrouter(
+async def ask_llm7(
     messages: list[dict],
     client: httpx.AsyncClient | None = None,
 ) -> str:
     own = client is None
     if own:
         client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
-    if not OPENROUTER_API_KEY:
-        if own:
-            await client.aclose()
-        raise RuntimeError("OPENROUTER_API_KEY не задан")
 
     try:
         headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {LLM7_API_KEY or 'unused'}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/",
-            "X-Title": "Kate bot",
         }
         payload = {
-            "model": MODEL,
+            "model": MODEL or "default",
             "messages": messages,
             "temperature": TEMPERATURE,
         }
-        response = await client.post(OPENROUTER_URL, headers=headers, json=payload)
+        response = await client.post(LLM7_URL, headers=headers, json=payload)
         if response.status_code != 200:
             raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
         return response.json()["choices"][0]["message"]["content"]
     finally:
         if own:
             await client.aclose()
+
+
+# Алиас для обратной совместимости: l6.py / l6_tg.py вызывают ask_openrouter().
+ask_openrouter = ask_llm7
 
 
 # ============================================================
